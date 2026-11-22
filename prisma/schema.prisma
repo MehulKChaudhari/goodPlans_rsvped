@@ -1,0 +1,77 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ORGANIZER
+  CUSTOMER
+}
+
+enum BookingStatus {
+  PENDING // seat held, awaiting confirmation within the hold TTL
+  CONFIRMED // customer confirmed within the hold window
+  CANCELLED // customer-initiated cancel (from PENDING or CONFIRMED)
+  EXPIRED // hold TTL elapsed without confirmation; system-released
+}
+
+model User {
+  id               String   @id @default(uuid())
+  name             String
+  email            String   @unique
+  passwordHash     String
+  role             Role
+  refreshTokenHash String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  events   Event[]
+  bookings Booking[]
+}
+
+model Event {
+  id               String   @id @default(uuid())
+  title            String
+  description      String
+  date             DateTime
+  location         String
+  totalTickets      Int
+  availableTickets Int
+  priceCents       Int
+  organizerId      String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  organizer User      @relation(fields: [organizerId], references: [id], onDelete: Restrict)
+  bookings  Booking[]
+
+  @@index([organizerId])
+  @@index([date])
+}
+
+model Booking {
+  id             String        @id @default(uuid())
+  userId         String
+  eventId        String
+  ticketsCount   Int
+  status         BookingStatus @default(PENDING)
+  idempotencyKey String?
+  holdExpiresAt  DateTime?
+  holdJobId      String?
+  confirmedAt    DateTime?
+  cancelledAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  event Event @relation(fields: [eventId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId])
+  @@index([eventId])
+  @@index([eventId, status])
+}
