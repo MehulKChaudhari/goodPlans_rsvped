@@ -455,11 +455,11 @@ The load test's real finding was that a popular event's row lock, not connection
 
 It wasn't implemented. The tradeoff is real: a Redis-backed counter means the cache and the ledger can disagree for a short window, and reconciling that correctly (what happens if the worker crashes mid-reconciliation, what happens on a Redis failover) is a meaningfully bigger problem than the one being solved in this exercise. One obviously-correct source of truth, with a known and documented ceiling, was judged better than a faster system with a harder-to-reason-about failure mode, given the time available. If the event volume ever actually demanded it, this is the next lever.
 
-### 8. Workers run in the same process as the API
+### 8. Workers run in a separate process from the API
 
-Considered: a separate worker entrypoint, deployed as its own process, so a spike in booking traffic doesn't compete with job processing for the event loop or the database connection pool.
+The API and the three BullMQ workers run as two separate entrypoints so a spike in booking traffic doesn't compete with job processing for the event loop or the database connection pool. `src/server.ts` only starts the HTTP server now; `src/worker.ts` is a standalone entrypoint that starts all three workers (`startBookingConfirmationWorker` and friends, unchanged) and does the same graceful shutdown on SIGTERM/SIGINT, just without an HTTP server to close.
 
-Decided instead, for this exercise: `src/server.ts` starts the HTTP server and all three BullMQ workers together. Splitting them is mechanical (the worker files already exist as standalone functions, `startBookingConfirmationWorker` and friends, so pulling them into a second `worker.ts` entrypoint and a second Railway service is a small change) but it doesn't change the correctness story being demonstrated here, and wasn't worth the setup time against everything else in scope.
+Both entrypoints build to `dist/` from the same `tsc` build, and `package.json` has a matching `worker:start` script (`node dist/worker.js`) alongside `start`. Deployment is two Railway services from the same repo: `railway.json` for the API and `railway.worker.json` for the worker, both NIXPACKS with the same restart policy. Only the API service's start command runs `db:deploy` before `pnpm run start`; the worker service just runs `pnpm run worker:start`. Migrations should run exactly once per deploy, and if both services ran `db:deploy` on startup they could race each other against the same database. The worker service also has no `healthcheckPath`, since it isn't an HTTP service and there's no endpoint to invent one for.
 
 ### 9. Load test measures a concurrency burst, not sustained throughput
 
