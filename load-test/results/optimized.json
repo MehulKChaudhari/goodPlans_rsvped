@@ -1,0 +1,88 @@
+{
+  "mode": "optimized",
+  "pool": 20,
+  "steps": [
+    10,
+    25,
+    50,
+    100,
+    200,
+    400,
+    800,
+    1200
+  ],
+  "results": [
+    {
+      "connections": 10,
+      "requestsPerSec": 10,
+      "latencyP50": 44,
+      "latencyP99": 53,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    },
+    {
+      "connections": 25,
+      "requestsPerSec": 25,
+      "latencyP50": 32,
+      "latencyP99": 43,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    },
+    {
+      "connections": 50,
+      "requestsPerSec": 50,
+      "latencyP50": 47,
+      "latencyP99": 80,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    },
+    {
+      "connections": 100,
+      "requestsPerSec": 100,
+      "latencyP50": 77,
+      "latencyP99": 109,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    },
+    {
+      "connections": 200,
+      "requestsPerSec": 200,
+      "latencyP50": 114,
+      "latencyP99": 199,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    },
+    {
+      "connections": 400,
+      "requestsPerSec": 400,
+      "latencyP50": 206,
+      "latencyP99": 383,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    },
+    {
+      "connections": 800,
+      "requestsPerSec": 800,
+      "latencyP50": 433,
+      "latencyP99": 679,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    },
+    {
+      "connections": 1200,
+      "requestsPerSec": 600,
+      "latencyP50": 495,
+      "latencyP99": 1009,
+      "errors": 0,
+      "timeouts": 0,
+      "non2xx": 0
+    }
+  ]
+}
