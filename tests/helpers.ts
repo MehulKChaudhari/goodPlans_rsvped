@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Role } from '@prisma/client';
 import { prisma } from '../src/lib/prisma';
 import { signAccessToken } from '../src/lib/jwt';
@@ -14,7 +15,10 @@ export async function createUser(role: Role) {
       role,
     },
   });
-  const accessToken = signAccessToken(user.id, user.role);
+  // These tests exercise event/booking routes, not session lifecycle, so a
+  // fresh sid with no backing Session row is fine: authenticate() only
+  // verifies the JWT, it doesn't look sessions up (only refresh/logout do).
+  const accessToken = signAccessToken(user.id, user.role, randomUUID());
   return { user, accessToken };
 }
 
@@ -36,5 +40,6 @@ export async function createEvent(organizerId: string, totalTickets: number) {
 export async function resetDb() {
   await prisma.booking.deleteMany();
   await prisma.event.deleteMany();
+  await prisma.session.deleteMany();
   await prisma.user.deleteMany();
 }

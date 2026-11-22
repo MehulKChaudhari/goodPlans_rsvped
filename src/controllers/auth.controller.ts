@@ -3,12 +3,12 @@ import * as authService from '../services/auth.service';
 import { AppError } from '../lib/app-error';
 
 export async function registerHandler(req: Request, res: Response) {
-  const { user, tokens } = await authService.register(req.body);
+  const { user, tokens } = await authService.register(req.body, req.header('user-agent'));
   res.status(201).json({ success: true, data: { user, ...tokens } });
 }
 
 export async function loginHandler(req: Request, res: Response) {
-  const { user, tokens } = await authService.login(req.body);
+  const { user, tokens } = await authService.login(req.body, req.header('user-agent'));
   res.status(200).json({ success: true, data: { user, ...tokens } });
 }
 
@@ -19,6 +19,6 @@ export async function refreshHandler(req: Request, res: Response) {
 
 export async function logoutHandler(req: Request, res: Response) {
   if (!req.user) throw AppError.unauthorized();
-  await authService.logout(req.user.sub);
+  await authService.logout(req.user.sub, req.user.sid);
   res.status(204).send();
 }

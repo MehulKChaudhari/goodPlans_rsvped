@@ -7,6 +7,7 @@ import { AppError } from '../lib/app-error';
 export interface AccessTokenPayload {
   sub: string;
   role: Role;
+  sid: string;
 }
 
 declare module 'express-serve-static-core' {
@@ -23,7 +24,7 @@ export function authenticate(req: Request, _res: Response, next: NextFunction) {
   const token = header.slice('Bearer '.length);
   try {
     const payload = jwt.verify(token, env.jwtAccessSecret) as AccessTokenPayload;
-    req.user = { sub: payload.sub, role: payload.role };
+    req.user = { sub: payload.sub, role: payload.role, sid: payload.sid };
     next();
   } catch {
     throw AppError.unauthorized('Invalid or expired token');

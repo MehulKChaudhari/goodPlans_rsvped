@@ -436,11 +436,18 @@ Decided instead: the key is a column on `Booking` with a unique constraint acros
 
 The obvious first implementation is to rate limit everything by IP. That's wrong for the booking route specifically: the thing worth limiting is one account hammering the endpoint, and a shared IP, whether that's a NAT, a corporate network, or (as came up directly while building the load-test harness) one machine simulating a thousand different customers, isn't the same thing as one account. Auth routes stay IP-keyed because there's no authenticated identity yet to key on, and the thing being defended against there (credential stuffing, brute force) actually is a source-IP problem.
 
-### 6. Single-session refresh token, hashed, not a session table
+### 6. Multi-device sessions (updated, see below for what shipped)
 
-Considered: a `Session` table keyed by device, so a user can be logged in on a phone and a laptop at once and log out of just one.
+This started as a scope cut: one refresh token per user, hashed with bcrypt, instead of a session per device. That closed the "database leak hands out usable session tokens" problem but left a real gap, logging in on a second device silently invalidated the first.
 
-Decided instead: one refresh token per user, hashed with bcrypt before it's stored, rather than kept as a plain string. This closes the "database leak hands out usable session tokens" problem, which felt like the one actually worth fixing given the time available. Multi-device sessions are a real gap this leaves open (logging in on a second device invalidates the first), and that's a straightforward next step, a `Session` table with one row per device instead of one token column on `User`, just not one that fit the time budget for this pass.
+With more time available, this got built properly. A `Session` table now holds one row per device/login: `id`, `userId`, `refreshTokenHash`, `userAgent`, `createdAt`, `lastUsedAt`. The refresh JWT carries the session id as a `sid` claim, so refresh and logout look up the exact session instead of scanning or sharing one column. Login and register each create a new session; refresh rotates that session's own hash in place; logout deletes just that one row.
+
+Two things came up building this that weren't part of the original plan, both load-bearing, not scope creep:
+
+- **Refresh tokens needed a `jti` (a random nonce per issuance).** Without one, two refresh tokens signed for the same session within the same second have an identical `sub`, `sid`, `iat`, and `exp`, so they're byte-for-byte the same JWT. That breaks rotation outright: the "old" and "new" tokens are indistinguishable, so a stolen old token would still work after the legitimate client rotated it.
+- **Refresh token hashing moved from bcrypt to SHA-256 with a constant-time compare.** bcrypt truncates its input at 72 bytes. Once tokens carry a `jti`, the part of the token that makes two issuances different sits past that 72-byte cutoff, which means bcrypt was comparing two different tokens as equal. This was caught by a test, not inspection: a "rotating the token kills the old one" test kept passing for the wrong reason, a debug script confirmed `bcrypt.compare(oldToken, newHash)` returning `true`, and tracing it back pointed at the 72-byte truncation. SHA-256 doesn't have that limit, and a refresh token is already high-entropy, so there's nothing for bcrypt's slow hashing to defend against here that a fast fixed-length digest doesn't equally defend against.
+
+Four integration tests cover this (`tests/auth-sessions.test.ts`): two sessions refreshing independently, logging out of one leaving the other alone, rotation killing the specific old token for that session, and a refresh attempt against a deleted session being rejected.
 
 ### 7. Ticket inventory stays in Postgres, not Redis
 
