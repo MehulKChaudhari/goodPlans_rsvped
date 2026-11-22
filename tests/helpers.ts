@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Role } from '@prisma/client';
 import { prisma } from '../src/lib/prisma';
 import { signAccessToken } from '../src/lib/jwt';
+import { redis } from '../src/config/redis';
 
 let counter = 0;
 
@@ -42,4 +43,15 @@ export async function resetDb() {
   await prisma.event.deleteMany();
   await prisma.session.deleteMany();
   await prisma.user.deleteMany();
+  await clearTicketCacheKeys();
+}
+
+// Scoped only to the ticket-cache feature's own key namespace so this
+// doesn't touch anything else that might live in the same test Redis db
+// (e.g. BullMQ job data).
+export async function clearTicketCacheKeys() {
+  const keys = await redis.keys('event:*:tickets');
+  if (keys.length > 0) {
+    await redis.del(...keys);
+  }
 }

@@ -5,6 +5,7 @@ import { AppError } from '../lib/app-error';
 import { env } from '../config/env';
 import { bookingConfirmationQueue } from '../queues/booking-confirmation.queue';
 import { cancelHoldExpiry, scheduleHoldExpiry } from '../queues/booking-hold-expiry.queue';
+import { ensureCached, release, resync, tryReserve } from '../lib/ticket-cache';
 
 export interface CreateHoldInput {
   userId: string;
@@ -25,6 +26,14 @@ export interface CreateHoldInput {
  * to 1/4 as long as the four-round-trip version, which raises the ceiling on
  * how many holds-per-second one hot event can sustain. Load-tested in
  * load-test/run.ts; see README "Performance" section for before/after numbers.
+ *
+ * In front of that CTE sits a Redis fast path (`src/lib/ticket-cache.ts`):
+ * an obviously-sold-out event is rejected off a Redis counter without ever
+ * taking the Postgres row lock. The CTE above still runs its own guarded
+ * UPDATE on the "reserved"/"cache miss" paths — it is the correctness
+ * backstop, not an optimization that can be skipped — so a stale or
+ * corrupted Redis entry can only cost a wasted round trip, never an
+ * overbooked seat. See README Decisions Log #7.
  */
 export async function createHold(input: CreateHoldInput): Promise<Booking> {
   if (input.idempotencyKey) {
@@ -34,23 +43,54 @@ export async function createHold(input: CreateHoldInput): Promise<Booking> {
     if (existing) return existing;
   }
 
+  const cacheResult = await tryReserve(input.eventId, input.ticketsCount);
+
+  if (cacheResult.outcome === 'sold_out') {
+    throw AppError.conflict('Not enough tickets available', 'SOLD_OUT');
+  }
+
+  if (cacheResult.outcome === 'cache_miss') {
+    const event = await prisma.event.findUnique({ where: { id: input.eventId } });
+    if (!event) throw AppError.notFound('Event not found');
+    await ensureCached(input.eventId, event.availableTickets);
+  }
+
   const bookingId = randomUUID();
   const holdExpiresAt = new Date(Date.now() + env.bookingHoldTtlMs);
 
-  const rows = await prisma.$queryRaw<Booking[]>(Prisma.sql`
-    WITH decremented AS (
-      UPDATE "Event"
-      SET "availableTickets" = "availableTickets" - ${input.ticketsCount}
-      WHERE id = ${input.eventId} AND "availableTickets" >= ${input.ticketsCount}
-      RETURNING id
-    )
-    INSERT INTO "Booking" (id, "userId", "eventId", "ticketsCount", status, "idempotencyKey", "holdExpiresAt", "createdAt", "updatedAt")
-    SELECT ${bookingId}, ${input.userId}, ${input.eventId}, ${input.ticketsCount}, 'PENDING'::"BookingStatus", ${input.idempotencyKey ?? null}, ${holdExpiresAt}, now(), now()
-    FROM decremented
-    RETURNING *
-  `);
+  let rows: Booking[];
+  try {
+    rows = await prisma.$queryRaw<Booking[]>(Prisma.sql`
+      WITH decremented AS (
+        UPDATE "Event"
+        SET "availableTickets" = "availableTickets" - ${input.ticketsCount}
+        WHERE id = ${input.eventId} AND "availableTickets" >= ${input.ticketsCount}
+        RETURNING id
+      )
+      INSERT INTO "Booking" (id, "userId", "eventId", "ticketsCount", status, "idempotencyKey", "holdExpiresAt", "createdAt", "updatedAt")
+      SELECT ${bookingId}, ${input.userId}, ${input.eventId}, ${input.ticketsCount}, 'PENDING'::"BookingStatus", ${input.idempotencyKey ?? null}, ${holdExpiresAt}, now(), now()
+      FROM decremented
+      RETURNING *
+    `);
+  } catch (err) {
+    // The Postgres write never happened, so a speculative Redis reservation
+    // from the "reserved" branch above must not survive this failure — left
+    // in place, it would wrongly reject the next request for this event as
+    // sold out until the next reconciliation sweep, even though no ticket
+    // was ever actually taken.
+    if (cacheResult.outcome === 'reserved') {
+      await release(input.eventId, input.ticketsCount);
+    }
+    throw err;
+  }
 
   if (rows.length === 0) {
+    if (cacheResult.outcome === 'reserved') {
+      // The Redis cache said tickets were available but Postgres's own
+      // guarded UPDATE disagreed — the cache had drifted stale-high. Put
+      // the speculative reservation back so it doesn't leak.
+      await release(input.eventId, input.ticketsCount);
+    }
     const event = await prisma.event.findUnique({ where: { id: input.eventId } });
     if (!event) throw AppError.notFound('Event not found');
     throw AppError.conflict('Not enough tickets available', 'SOLD_OUT');
@@ -119,10 +159,10 @@ async function releaseBooking(
   fromStatuses: Array<'PENDING' | 'CONFIRMED'>,
   toStatus: 'CANCELLED' | 'EXPIRED',
 ): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+  const released = await prisma.$transaction(async (tx) => {
     const booking = await tx.booking.findUnique({ where: { id: bookingId } });
     if (!booking || !fromStatuses.includes(booking.status as 'PENDING' | 'CONFIRMED')) {
-      return;
+      return null;
     }
 
     const updated = await tx.booking.updateMany({
@@ -133,13 +173,35 @@ async function releaseBooking(
       },
     });
 
-    if (updated.count === 0) return;
+    if (updated.count === 0) return null;
 
     await tx.event.update({
       where: { id: booking.eventId },
       data: { availableTickets: { increment: booking.ticketsCount } },
     });
+
+    return { eventId: booking.eventId, ticketsCount: booking.ticketsCount };
   });
+
+  // Redis is never part of the Postgres transaction. The Postgres write is
+  // already committed and authoritative by this point; the cache update is
+  // best-effort bookkeeping on top of it (release() itself fails open, so
+  // this can't throw and undo the commit above).
+  if (released) {
+    await release(released.eventId, released.ticketsCount);
+  }
+}
+
+/**
+ * Re-syncs the Redis-cached ticket count for one event back to Postgres's
+ * true `availableTickets`. Used both ad hoc and by the periodic
+ * reconciliation sweep (`src/jobs/ticket-cache-reconciliation.ts`) to undo
+ * any drift the fast path's advisory writes may have introduced.
+ */
+export async function reconcileTicketCache(eventId: string): Promise<void> {
+  const event = await prisma.event.findUnique({ where: { id: eventId } });
+  if (!event) return;
+  await resync(eventId, event.availableTickets);
 }
 
 export async function getBookingById(bookingId: string, userId: string): Promise<Booking> {
